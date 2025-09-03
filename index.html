@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Spectrogramme 3D (Cube) — points & lignes, no-loop, couleurs évolutives</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Three.js via import map -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <style>
+    html,body{margin:0;height:100%;background:#06070a;color:#e5e7eb;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+    canvas{display:block}
+    #ui{position:fixed;top:12px;left:12px;z-index:20;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;background:rgba(15,18,25,.7);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:10px 12px;max-width:min(95vw,1200px)}
+    #ui label{font-size:12px;opacity:.9;display:flex;align-items:center;gap:6px}
+    .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid rgba(255,255,255,.12);border-radius:999px;background:#111827}
+    input[type=range]{width:120px}
+    button{cursor:pointer;border:1px solid rgba(255,255,255,.15);background:#0f172a;color:#e5e7eb;border-radius:10px;padding:6px 10px}
+    #hud{position:fixed;right:12px;top:12px;z-index:20;width:330px;max-height:48vh;overflow:auto;background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:10px 12px;font-size:12px;line-height:1.35}
+    small{opacity:.8}
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <span class="pill"><b>Audio</b> <input type="file" id="file" accept="audio/*" /> <button id="playBtn" disabled>Play</button> <button id="resetBtn">Reset capture</button> <span id="stat">charge un audio puis Play</span></span>
+    <span class="pill"><label><input type="checkbox" id="wrap"> Wrap (loop)</label></span>
+    <span class="pill"><label><input type="checkbox" id="showPoints" checked> Points</label></span>
+    <span class="pill"><label><input type="checkbox" id="showLines" checked> Lignes</label></span>
+    <span class="pill"><label><input type="checkbox" id="axes" checked> Axes & cube</label></span>
+    <span class="pill"><label><input type="checkbox" id="autorot"> Auto-rotate</label></span>
+    <span class="pill"><label>profondeur Z <input id="depth" type="range" min="0.2" max="3.0" step="0.05" value="1.4"></label></span>
+    <span class="pill"><label>smoothing <input id="smooth" type="range" min="0.00" max="0.60" step="0.02" value="0.28"></label></span>
+    <span class="pill"><label>seuil (bruit) <input id="floor" type="range" min="0.00" max="0.20" step="0.01" value="0.04"></label></span>
+    <span class="pill"><label>taille pts <input id="psize" type="range" min="0.6" max="6.0" step="0.1" value="2.0"></label></span>
+    <small>X = temps (gauche→droite), Y = fréquence (grave→aigu), Z = amplitude. Couleurs = phase temporelle (évolutive), pas la fréquence.</small>
+  </div>
+
+  <div id="hud">
+    <div><b>AudioContext</b>: <span id="hudAC">–</span></div>
+    <div><b>FFT</b>: <span id="hudFFT">–</span> • <b>Head</b>: <span id="hudHead">0</span></div>
+    <div><b>L/M/H</b>: <span id="hudLMH">–</span> • <b>Flux</b>: <span id="hudFlux">–</span></div>
+    <div><b>Centroid</b>: <span id="hudC">–</span> • <b>Flatness</b>: <span id="hudF">–</span> • <b>RMS</b>: <span id="hudR">–</span></div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // === UI refs ===
+    const fileInput = document.getElementById('file');
+    const playBtn = document.getElementById('playBtn');
+    const resetBtn= document.getElementById('resetBtn');
+    const statEl  = document.getElementById('stat');
+    const wrapEl  = document.getElementById('wrap');
+    const showPointsEl = document.getElementById('showPoints');
+    const showLinesEl  = document.getElementById('showLines');
+    const axesEl  = document.getElementById('axes');
+    const autorotEl = document.getElementById('autorot');
+    const depthEl = document.getElementById('depth');
+    const smoothEl= document.getElementById('smooth');
+    const floorEl = document.getElementById('floor');
+    const psizeEl = document.getElementById('psize');
+    const hudAC = document.getElementById('hudAC');
+    const hudFFT= document.getElementById('hudFFT');
+    const hudHead = document.getElementById('hudHead');
+    const hudLMH = document.getElementById('hudLMH');
+    const hudFlux= document.getElementById('hudFlux');
+    const hudC = document.getElementById('hudC');
+    const hudF = document.getElementById('hudF');
+    const hudR = document.getElementById('hudR');
+
+    // === THREE scene ===
+    const scene = new THREE.Scene(); scene.background = new THREE.Color(0x06070a);
+    const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 2000); camera.position.set(0,0.9,6.0);
+    const renderer = new THREE.WebGLRenderer({antialias:true}); renderer.setSize(innerWidth, innerHeight); document.body.appendChild(renderer.domElement);
+    const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true;
+
+    scene.add(new THREE.HemisphereLight(0x1b2a5a, 0x040507, 0.6));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.35); dir.position.set(2,5,3); scene.add(dir);
+
+    // Repère (cube + axes)
+    const CUBE = 3.0;
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(CUBE*2,CUBE*2,CUBE*2)), new THREE.LineBasicMaterial({color:0x2b405f,transparent:true,opacity:0.5}));
+    scene.add(edges);
+    function axis(color,a,b){ const g=new THREE.BufferGeometry().setFromPoints([a,b]); return new THREE.Line(g,new THREE.LineBasicMaterial({color,transparent:true,opacity:0.9})); }
+    const xAxis=axis(0x7aa2ff,new THREE.Vector3(-CUBE,-CUBE,-CUBE),new THREE.Vector3(+CUBE,-CUBE,-CUBE));
+    const yAxis=axis(0x7dffa9,new THREE.Vector3(-CUBE,-CUBE,-CUBE),new THREE.Vector3(-CUBE,+CUBE,-CUBE));
+    const zAxis=axis(0xffb36b,new THREE.Vector3(-CUBE,-CUBE,-CUBE),new THREE.Vector3(-CUBE,-CUBE,+CUBE));
+    scene.add(xAxis,yAxis,zAxis);
+
+    // === Audio ===
+    const audioCtx = new (window.AudioContext||window.webkitAudioContext)(); hudAC.textContent=audioCtx.state;
+    let mediaElement=null, srcNode=null, analyser=null;
+    const FFT_SIZE=4096; hudFFT.textContent=(FFT_SIZE/2).toString();
+    const u8Spec = new Uint8Array(FFT_SIZE/2), prevSpec = new Uint8Array(FFT_SIZE/2);
+    let hueAcc=0; // phase couleur évolutive
+    let fluxEMA=0, fluxReady=false;
+
+    // === Spectro data ===
+    const HOPS=240, BINS=96; // largeur temps & nb bandes (log)
+    const SPEC_W=HOPS, SPEC_H=BINS;
+    let head=0, frozen=false;
+    const specData = new Uint8Array(SPEC_W*SPEC_H); // 0..255 amplitudes
+    const specTex  = new THREE.DataTexture(specData,SPEC_W,SPEC_H,THREE.RedFormat,THREE.UnsignedByteType); specTex.needsUpdate=true;
+
+    // Meta par colonne: R=centroid(0..1), G=flatness(0..1), B=RMS approx (0..1), A=huePhase(0..1)
+    const metaData = new Uint8Array(SPEC_W*4); // RGBA
+    const metaTex  = new THREE.DataTexture(metaData, SPEC_W, 1, THREE.RGBAFormat, THREE.UnsignedByteType); metaTex.needsUpdate=true;
+
+    // Lissage temporel pour fluidité
+    const smoothBins = new Float32Array(SPEC_H).fill(0);
+
+    // === Points (grille temps×fréquence) ===
+    const N = SPEC_W*SPEC_H;
+    const uvs = new Float32Array(N*2), posDummy = new Float32Array(N*3);
+    for(let j=0,iu=0,ip=0;j<SPEC_H;j++){ for(let i=0;i<SPEC_W;i++){ const u=(i+0.5)/SPEC_W, v=(j+0.5)/SPEC_H; uvs[iu++]=u; uvs[iu++]=v; posDummy[ip++]=0; posDummy[ip++]=0; posDummy[ip++]=0; } }
+    const geoPts = new THREE.BufferGeometry(); geoPts.setAttribute('uv',new THREE.BufferAttribute(uvs,2)); geoPts.setAttribute('position',new THREE.BufferAttribute(posDummy,3));
+    const uni = {
+      uSpec:{value:specTex}, uMeta:{value:metaTex},
+      uHead:{value:head}, uWrap:{value:0},
+      uDepth:{value:parseFloat(depthEl.value)}, uPointSize:{value:parseFloat(psizeEl.value)},
+      uCube:{value:CUBE}, uFloor:{value:parseFloat(floorEl.value)}
+    };
+    const vsPts = `
+      uniform sampler2D uSpec, uMeta;
+      uniform float uHead, uDepth, uPointSize, uCube;
+      uniform int uWrap;
+      varying float vAmp, vAge;
+      varying vec4  vMeta; // centroid, flatness, rms, huePhase
+
+      float colX(float u, float W){
+        if(uWrap==1){
+          return mod(u*W - (W - 1.0 - uHead), W) / W; // wrap
+        }else{
+          return u; // no-wrap: colonnes fixes
+        }
+      }
+      void main(){
+        vec2 uv0=uv; float W=float(${SPEC_W}.0);
+        float xCol=colX(uv0.x, W);
+        vAmp = texture2D(uSpec, vec2(xCol, uv0.y)).r;
+        vMeta= texture2D(uMeta, vec2(xCol, 0.5));
+        vAge = 1.0 - xCol; // récent à droite
+
+        float X=(xCol - 0.5)*2.0*uCube;
+        float Y=(uv0.y - 0.5)*2.0*uCube;
+        float Z=(-uCube) + vAmp * (2.0*uCube) * (uDepth/2.0);
+
+        vec4 mv = modelViewMatrix*vec4(X,Y,Z,1.0);
+        float dist=max(1.0,-mv.z);
+        gl_PointSize = uPointSize*(300.0/dist);
+        gl_Position = projectionMatrix*mv;
+      }
+    `;
+    const fsPts = `
+      precision highp float;
+      uniform float uFloor;
+      varying float vAmp, vAge;
+      varying vec4  vMeta; // r=centroid, g=flatness, b=rms, a=huePhase
+
+      vec3 hsv2rgb(vec3 c){
+        vec3 rgb=clamp(abs(mod(c.x*6.0+vec3(0.,4.,2.),6.0)-3.0)-1.0,0.0,1.0);
+        rgb=rgb*rgb*(3.0-2.0*rgb);
+        return c.z*mix(vec3(1.0),rgb,c.y);
+      }
+      void main(){
+        vec2 p = gl_PointCoord - 0.5;
+        float r2 = dot(p,p);
+        float edge = smoothstep(0.5,0.40,length(p));
+        float core = exp(-16.0*r2);
+
+        float amp = max(0.0, vAmp - uFloor) / max(1e-6, (1.0-uFloor));
+        // Couleur évolutive: hue = meta.a (phase) modulée légèrement par centroid
+        float hue = fract(vMeta.a + (vMeta.r-0.5)*0.12);
+        float sat = 0.85;
+        float val = mix(0.10, 1.0, amp) * mix(0.95, 0.25, vAge); // ancien = plus sombre
+        vec3 col = hsv2rgb(vec3(hue, sat, val));
+
+        float alpha = clamp(edge*0.25 + core*0.9, 0.0, 1.0);
+        alpha *= mix(1.0, 0.15, vAge);
+        if (amp<=0.0) alpha *= 0.05;
+
+        gl_FragColor = vec4(col, alpha);
+      }
+    `;
+    const matPts = new THREE.ShaderMaterial({
+      transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+      uniforms:uni, vertexShader:vsPts, fragmentShader:fsPts
+    });
+    const points = new THREE.Points(geoPts, matPts); points.frustumCulled=false; scene.add(points);
+
+    // === Lignes (courbes temporelles sur sous-ensemble de bandes) ===
+    const LINE_STRIDE = 6;                       // 1 ligne toutes les 6 bandes
+    const LINE_BINS = Math.floor(SPEC_H/LINE_STRIDE);
+    const lineBinIdx = Array.from({length:LINE_BINS}, (_,k)=>Math.min(SPEC_H-1, Math.floor(k*LINE_STRIDE + LINE_STRIDE*0.5)));
+
+    // Historique d’amplitude pour recalcul Z si depth change
+    const lineHist = new Float32Array(SPEC_W*LINE_BINS).fill(0);
+
+    const SEGMENTS = (SPEC_W-1)*LINE_BINS;
+    const linePos = new Float32Array(SEGMENTS*2*3); // 2 sommets par segment
+    const lineCol = new Float32Array(SEGMENTS*2*3); // couleur dégradée par sommet
+
+    const geoLines = new THREE.BufferGeometry();
+    geoLines.setAttribute('position', new THREE.BufferAttribute(linePos,3).setUsage(THREE.DynamicDrawUsage));
+    geoLines.setAttribute('color',    new THREE.BufferAttribute(lineCol,3).setUsage(THREE.DynamicDrawUsage));
+    geoLines.setDrawRange(0, 0);
+    const matLines = new THREE.LineBasicMaterial({ vertexColors:true, transparent:true, opacity:0.9, blending:THREE.AdditiveBlending });
+    const lines = new THREE.LineSegments(geoLines, matLines); scene.add(lines);
+
+    function hsv2rgb(h,s,v){ // h 0..1
+      const i=Math.floor(h*6); const f=h*6-i;
+      const p=v*(1-s), q=v*(1-f*s), t=v*(1-(1-f)*s);
+      const m = [
+        [v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]
+      ][i%6];
+      return m;
+    }
+
+    function updateLineSegment(i){ // connecte i-1 -> i pour chaque ligne
+      if(i<=0) return;
+      const x0 = ((i-1)+0.5)/SPEC_W, x1=((i)+0.5)/SPEC_W;
+      const X0 = (x0-0.5)*2*CUBE,    X1=(x1-0.5)*2*CUBE;
+      const meta0_h = metaData[((i-1)*4)+3]/255, meta1_h = metaData[(i*4)+3]/255;
+
+      for(let k=0;k<LINE_BINS;k++){
+        const idx = (i-1)*LINE_BINS + k; // segment index
+        const base = idx*2*3;
+
+        const b = lineBinIdx[k];
+        const y = ((b+0.5)/SPEC_H - 0.5)*2*CUBE;
+
+        const amp0 = lineHist[(i-1)*LINE_BINS + k];
+        const amp1 = lineHist[(i)*LINE_BINS + k];
+
+        const Z0 = (-CUBE) + amp0 * (2*CUBE) * (parseFloat(depthEl.value)/2.0);
+        const Z1 = (-CUBE) + amp1 * (2*CUBE) * (parseFloat(depthEl.value)/2.0);
+
+        // positions
+        linePos[base+0]=X0; linePos[base+1]=y; linePos[base+2]=Z0;
+        linePos[base+3]=X1; linePos[base+4]=y; linePos[base+5]=Z1;
+
+        // couleurs: hue meta par colonne (phase temporelle), sat fixe, val selon amp
+        const c0 = hsv2rgb(meta0_h, 0.85, Math.max(0.15, amp0));
+        const c1 = hsv2rgb(meta1_h, 0.85, Math.max(0.15, amp1));
+        lineCol[base+0]=c0[0]; lineCol[base+1]=c0[1]; lineCol[base+2]=c0[2];
+        lineCol[base+3]=c1[0]; lineCol[base+4]=c1[1]; lineCol[base+5]=c1[2];
+      }
+      geoLines.attributes.position.needsUpdate=true;
+      geoLines.attributes.color.needsUpdate=true;
+      geoLines.setDrawRange(0, i*LINE_BINS*2); // 2 sommets par segment
+    }
+
+    function recomputeAllLines(){
+      for(let i=1;i<head+1;i++) updateLineSegment(i);
+    }
+
+    // === Helpers FFT & features ===
+    function fftToBinsLog(u8src, H){
+      const n=u8src.length, minI=2, maxI=n-1; const out=new Float32Array(H); let m=0;
+      for(let b=0;b<H;b++){
+        const t0=b/H, t1=(b+1)/H;
+        const i0=Math.floor(minI*Math.pow(maxI/minI,t0)), i1=Math.floor(minI*Math.pow(maxI/minI,t1));
+        let s=0,c=0; for(let i=i0;i<=i1;i++){ s+=u8src[i]; c++; }
+        const v=c? (s/c)/255 : 0; out[b]=v; if(v>m)m=v;
+      }
+      if(m>0){ const k=1/m; for(let i=0;i<H;i++) out[i]=Math.pow(out[i]*k,0.75); }
+      return out;
+    }
+    function featuresFromBins(bins){ // centroid/flatness/rms approx sur échelle log
+      let sum=0, wsum=0, logsum=0, n=bins.length;
+      for(let j=0;j<n;j++){ const v=Math.max(1e-6,bins[j]); sum+=v; wsum+=j*v; logsum+=Math.log(v); }
+      const centroid = n>1 ? (wsum/(sum+1e-6))/(n-1) : 0;                 // 0..1
+      const gm = Math.exp(logsum/n), am = sum/n; const flat = Math.min(1, gm/(am+1e-6)); // 0..1
+      const rms = Math.sqrt(sum/n);                                       // ~0..1
+      return {centroid, flat, rms};
+    }
+
+    function writeColumn(bins){
+      // amplitudes → texture
+      for(let j=0;j<SPEC_H;j++){ specData[j*SPEC_W + head] = Math.max(0, Math.min(255, Math.floor(bins[j]*255))); }
+      specTex.needsUpdate=true;
+
+      // features → meta (RGBA)
+      const f = featuresFromBins(bins);
+      const flux = computeFlux(); // dépend de prevSpec/u8Spec
+      hueAcc = (hueAcc + (flux*0.18 + f.rms*0.05)) % 1.0; // évolution couleur
+
+      metaData[head*4+0] = Math.floor(f.centroid*255);
+      metaData[head*4+1] = Math.floor(f.flat*255);
+      metaData[head*4+2] = Math.floor(Math.min(1,f.rms)*255);
+      metaData[head*4+3] = Math.floor(hueAcc*255);
+      metaTex.needsUpdate=true;
+
+      // historise pour les lignes
+      for(let k=0;k<LINE_BINS;k++){ const b=lineBinIdx[k]; lineHist[head*LINE_BINS + k] = bins[b]; }
+
+      // MAJ lignes entre head-1 et head
+      updateLineSegment(head);
+
+      // avance head (no-loop = freeze à la fin)
+      const doWrap = wrapEl.checked ? 1 : 0;
+      uni.uWrap.value = doWrap;
+      if(doWrap){ head = (head+1)%SPEC_W; }
+      else { head = Math.min(SPEC_W-1, head+1); if(head===SPEC_W-1) frozen=true; }
+      uni.uHead.value = head; hudHead.textContent=head.toString();
+    }
+
+    // Spectral flux (pour couleur + HUD)
+    function computeFlux(){
+      let flux=0; for(let i=0;i<u8Spec.length;i++){ const d=(u8Spec[i]-prevSpec[i])/255; if(d>0) flux+=d; }
+      flux/=u8Spec.length; prevSpec.set(u8Spec);
+      if(!fluxReady){ fluxEMA=flux; fluxReady=true; } else { fluxEMA = 0.88*fluxEMA + 0.12*flux; }
+      hudFlux.textContent = flux.toFixed(3);
+      return flux;
+    }
+
+    // === Audio wiring ===
+    fileInput.addEventListener('change', async e=>{
+      const file=e.target.files?.[0]; if(!file) return;
+      if(mediaElement){ mediaElement.pause(); mediaElement.src=''; mediaElement=null; }
+      const url=URL.createObjectURL(file);
+      const el=new Audio(); el.src=url; el.loop=true; el.crossOrigin='anonymous'; mediaElement=el;
+
+      srcNode?.disconnect();
+      srcNode = audioCtx.createMediaElementSource(el);
+      analyser = audioCtx.createAnalyser(); analyser.fftSize=FFT_SIZE; analyser.smoothingTimeConstant=0.7;
+      srcNode.connect(analyser); srcNode.connect(audioCtx.destination);
+
+      playBtn.disabled=false; statEl.textContent='fichier prêt — Play';
+      resetCapture(); // clean slate
+    });
+
+    function resetCapture(){
+      head=0; frozen=false; hueAcc=0; fluxReady=false;
+      specData.fill(0); specTex.needsUpdate=true;
+      metaData.fill(0); metaTex.needsUpdate=true;
+      lineHist.fill(0);
+      geoLines.setDrawRange(0,0);
+    }
+
+    resetBtn.addEventListener('click', resetCapture);
+
+    let playing=false;
+    playBtn.addEventListener('click', async ()=>{
+      if(!mediaElement) return;
+      if(audioCtx.state==='suspended') await audioCtx.resume();
+      hudAC.textContent = audioCtx.state;
+      playing=!playing;
+      if(playing){ await mediaElement.play(); playBtn.textContent='Pause'; statEl.textContent='lecture en cours'; }
+      else { mediaElement.pause(); playBtn.textContent='Play'; statEl.textContent='en pause'; }
+    });
+
+    // === Main loop ===
+    const rawBins = new Float32Array(SPEC_H);
+    let lastT=performance.now();
+    function animate(){
+      requestAnimationFrame(animate);
+      controls.update();
+      if(autorotEl.checked) scene.rotation.y += 0.0022;
+
+      const now=performance.now(), dt=Math.min(0.05,(now-lastT)/1000); lastT=now;
+
+      const showAxes=axesEl.checked; edges.visible=showAxes; xAxis.visible=showAxes; yAxis.visible=showAxes; zAxis.visible=showAxes;
+      points.visible = showPointsEl.checked;
+      lines.visible  = showLinesEl.checked;
+
+      uni.uDepth.value = parseFloat(depthEl.value);
+      uni.uPointSize.value = parseFloat(psizeEl.value);
+      uni.uFloor.value = parseFloat(floorEl.value);
+
+      if(analyser && !frozen){
+        analyser.getByteFrequencyData(u8Spec);
+
+        // bandes L/M/H pour HUD
+        const N=u8Spec.length, lEnd=Math.floor(N*0.12), mEnd=Math.floor(N*0.45);
+        let L=0,M=0,H=0;
+        for(let i=0;i<N;i++){ const v=u8Spec[i]/255; if(i<lEnd)L+=v; else if(i<mEnd)M+=v; else H+=v; }
+        L/=Math.max(1,lEnd); M/=Math.max(1,mEnd-lEnd); H/=Math.max(1,N-mEnd);
+        hudLMH.textContent = `${L.toFixed(2)} / ${M.toFixed(2)} / ${H.toFixed(2)}`;
+
+        // log-binning + smoothing + floor
+        const bins = fftToBinsLog(u8Spec, SPEC_H);
+        const alpha = 1.0 - parseFloat(smoothEl.value); // 0 = très lissé
+        const floor = uni.uFloor.value;
+        for(let j=0;j<SPEC_H;j++){
+          const floored = Math.max(0, bins[j] - floor) / Math.max(1e-6,(1.0-floor));
+          smoothBins[j] = smoothBins[j]*(1.0-alpha) + floored*alpha;
+          rawBins[j] = smoothBins[j];
+        }
+        writeColumn(rawBins);
+      }
+      renderer.render(scene,camera);
+    }
+    animate();
+
+    // profondeur Z change → on recalcule lignes
+    depthEl.addEventListener('input', ()=>{ recomputeAllLines(); });
+
+    // wrap change (shader side handled per writeColumn)
+    wrapEl.addEventListener('change', ()=>{
+      uni.uWrap.value = wrapEl.checked?1:0;
+    });
+
+    addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+  </script>
+</body>
+</html>
