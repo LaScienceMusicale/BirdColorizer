@@ -16,9 +16,7 @@ Projet expérimental créatif de **La Science Musicale**, explorant les correspo
 
 ## Outils et dépendances
 
-- Python : AudioCLIP, librosa, PyTorch
-- Xcode : Swift, Metal, SceneKit
-- Environnements : Anaconda (Python), macOS (Xcode)
+- WebGl - Html
 
 ## Exemple d'utilisation
 
